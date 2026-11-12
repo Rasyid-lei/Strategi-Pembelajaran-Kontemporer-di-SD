@@ -180,6 +180,22 @@ body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,san
 .ex-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
 .ex-tag{font-size:11px;padding:3px 10px;border-radius:99px;background:var(--surf3);color:var(--text2);border:1px solid var(--border)}
 .ex-tag.ok{color:var(--green)}.ex-tag.warn{color:var(--gold)}.ex-tag.fix{color:var(--red)}
+
+.mcard{display:flex;align-items:center;gap:12px;background:linear-gradient(135deg,#1d2840,#2a1f4d);border:1px solid rgba(124,92,252,.45);border-radius:var(--r);padding:11px 14px;cursor:pointer;user-select:none;-webkit-user-select:none}
+.mcard.open{border-color:var(--gold);background:linear-gradient(135deg,#2b2410,#1d2840)}
+.mcard.done{border-color:var(--green);background:linear-gradient(135deg,#12301f,#1d2840);animation:popIn .4s}
+.mcard.all{cursor:default;border-color:var(--gold)}
+.mc-face{font-size:34px;line-height:1;flex-shrink:0;animation:mcFlip .45s}
+@keyframes mcFlip{from{transform:rotateY(90deg) scale(.7)}to{transform:none}}
+.mc-body{flex:1;min-width:0;font-size:13px;line-height:1.4}.mc-body b{display:block;font-size:13px}.mc-body small{color:var(--text2);font-size:11px}
+.mc-prog{font-size:10px;font-weight:700;color:var(--text2);text-align:right;flex-shrink:0;line-height:1.5}
+.mc-bar{height:3px;border-radius:3px;background:rgba(255,255,255,.12);margin-top:6px;overflow:hidden}
+.mc-bar i{display:block;height:100%;background:var(--gold);animation:mcBar 3s linear forwards}
+@keyframes mcBar{from{width:100%}to{width:0}}
+.cf{position:fixed;top:-14px;width:8px;height:14px;z-index:9996;pointer-events:none;animation:cfFall 2.1s ease-in forwards}
+@keyframes cfFall{to{transform:translate(var(--dx),108vh) rotate(720deg)}}
+.lb-ms{display:flex;flex-wrap:wrap;gap:4px;margin-top:3px}
+.lb-ms span{font-size:10px;font-weight:700;color:var(--gold);background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);border-radius:99px;padding:1px 7px;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -274,8 +290,7 @@ body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,san
   <div class="timer-card" id="timer-card">
     <div class="timer-top">
       <span class="timer-lbl">⏱ Waktu Tersisa</span>
-      <button class="vib-btn" id="vib-btn" onclick="toggleVibe()">📳 Getar: ON</button>
-      <button class="vib-btn" id="vib-test" onclick="testVibe()">Tes</button>
+      <button class="vib-btn" id="vib-test" onclick="wakeAll()" title="Getarkan semua HP peserta lain">🔔 Bangunkan</button>
       <span class="timer-num" id="timer-num">60</span>
     </div>
     <div class="timer-progress">
@@ -289,6 +304,7 @@ body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,san
     </div>
     <div class="prog-wrap"><div class="prog-fill" id="q-prog"></div></div>
   </div>
+  <div class="mcard" id="mcard" onclick="peekMission()"></div>
   <div class="card">
     <div class="q-num" id="q-num">Soal 1</div>
     <div class="q-text" id="q-text"></div>
@@ -599,7 +615,8 @@ const S = {
   voting: false,       // guard flag to prevent concurrent castVote calls (race condition)
   rejoining: false,    // true selama pendaftaran ulang node pemain sedang berjalan
   myJoinedAt: null,    // joinedAt asli node pemain kita (disimpan lokal untuk dipakai saat daftar ulang)
-  renderKey: null, textKey: null, explFor: -1, lastHostId: null, lastVibSec: null, vibeOn: true
+  renderKey: null, textKey: null, explFor: -1, lastHostId: null, lastVibSec: null,
+  lastMCount: null, mOpen: false, mT: null, mKey: null, mCele: null, mBusy: false
 };
 
 // ══════════════════════════════════════════
@@ -735,6 +752,7 @@ function leaveRoomPlayer() {
 
 function attach(code) {
   detach();
+  S.wakeInit = false;
   registerPresence(code);
   S.snapRef = db.ref('rooms/' + code).on('value', snap => {
     if (!snap.exists()) {
@@ -937,6 +955,9 @@ async function onJoinRoom() {
 // ══════════════════════════════════════════
 function onRoom(room) {
   const { status } = room;
+  wakeCheck(room);
+  if (status === 'revealed' || status === 'finished') checkMission(room);
+  if (status === 'finished') renderMission(room);
   if (status === 'waiting') renderLobby(room);
   else if (status === 'active') renderQ(room, false);
   else if (status === 'revealed') renderQ(room, true);
@@ -1071,6 +1092,8 @@ function renderQ(room, revealed) {
   if (elCor) elCor.textContent = myCor;
   if (elWrong) elWrong.textContent = myWrong;
 
+  renderMission(room);
+
   // Persetujuan peserta
   const st = readyStats(room);
   const last = (ci + 1 >= total);
@@ -1111,7 +1134,15 @@ async function castVote(dp, qi, correctDP) {
   if (_timerLocked) return;        // waktu habis / jawaban dikunci
   S.voting = true;
   const prevVote = S.myVote;
-  if (prevVote === dp) { S.voting = false; return; }
+  const room = S.lastRoom || {};
+  const stored = _at(room.playerAnswers, qi, S.uid);        // jawaban tersimpan di Firebase (tahan refresh)
+  if (prevVote === dp || stored === dp) { S.voting = false; return; }
+
+  // Metadata untuk misi: waktu jawab (ms sejak soal mulai, waktu server) & jumlah ganti jawaban
+  const had = stored !== undefined || prevVote !== null;
+  const pm = _at(room.answerMeta, qi, S.uid);
+  const meta = { ms: Math.max(0, Date.now() + (S.offset || 0) - (room.questionStartedAt || (Date.now() + (S.offset || 0)))),
+                 changes: had ? ((pm && pm.changes) || 0) + 1 : 0 };
 
   if (prevVote === null) { S.myTotal++; if (dp === correctDP) S.myCorrect++; }
   else { if (prevVote === correctDP) S.myCorrect--; if (dp === correctDP) S.myCorrect++; }
@@ -1119,8 +1150,11 @@ async function castVote(dp, qi, correctDP) {
 
   document.querySelectorAll('#q-opts .opt-btn').forEach((b, i) => b.classList.toggle('voted-me', i === dp));
   try {
-    // Hanya simpan jawabanku sendiri — jumlah pemilih per opsi dihitung dari playerAnswers
-    await db.ref('rooms/'+S.code+'/playerAnswers/'+qi+'/'+S.uid).set(dp);
+    // Jawaban + metadata ditulis sekaligus dalam satu update atomik
+    await db.ref('rooms/'+S.code).update({
+      ['playerAnswers/'+qi+'/'+S.uid]: dp,
+      ['answerMeta/'+qi+'/'+S.uid]: meta
+    });
   } catch(e) {
     toast('Gagal menyimpan jawaban: ' + e.message, 'err');
     S.myVote = prevVote;
@@ -1223,6 +1257,7 @@ function resetLocal() {
   S.renderKey = null; S.textKey = null; S.explFor = -1; S.lastHostId = null; S.lastVibSec = null;
   _timerLocked = false;
   S.rejoining = false; S.myJoinedAt = null;
+  S.lastMCount = null; S.mOpen = false; clearTimeout(S.mT); S.mKey = null; S.mCele = null; S.mBusy = false;
 }
 
 function handleHostChange(room) {
@@ -1278,35 +1313,164 @@ async function doLeave() {
 
 function hostNewRoom() { doLeave(); }
 
-function initVibe() {
-  S.vibeOn = localStorage.getItem('quiz_vibe') !== '0';
-  const b = document.getElementById('vib-btn'); if (!b) return;
-  const tb = document.getElementById('vib-test');
-  if (!('vibrate' in navigator)) { b.style.display = 'none'; if (tb) tb.style.display = 'none'; return; }
-  b.textContent = S.vibeOn ? '📳 Getar: ON' : '🔕 Getar: OFF';
+// ── Panggil / bangunkan teman: getar di SEMUA HP peserta lain ──
+async function wakeAll() {
+  if (!S.code) return;
+  const now = Date.now() + (S.offset || 0), last = S.lastRoom && S.lastRoom.wake;
+  if (last && last.at && now - last.at < 5000) { toast('Tunggu sebentar sebelum memanggil lagi ⏳', 'info', 2000); return; }
+  vib([200, 100, 200]);   // ketukan ini juga "membuka izin getar" di browser HP-mu
+  try {
+    await db.ref('rooms/' + S.code + '/wake').set({ by: S.uid, name: S.name || 'Seseorang', at: firebase.database.ServerValue.TIMESTAMP });
+    toast('🔔 Semua HP dipanggil!', 'ok', 2500);
+  } catch (e) { toast('Gagal memanggil: ' + ((e && e.message) || e), 'err'); }
 }
-function toggleVibe() {
-  S.vibeOn = !S.vibeOn; localStorage.setItem('quiz_vibe', S.vibeOn ? '1' : '0'); initVibe();
-  if (S.vibeOn && navigator.vibrate) navigator.vibrate(40);
-}
-// Tes getar manual (tidak terpengaruh tombol ON/OFF) — untuk memeriksa apakah HP-mu menggetarkan saat ada musik
-function testVibe() {
-  let accepted = false;
-  try { accepted = navigator.vibrate([250, 120, 250]); } catch(e) {}
-  toast(accepted ? '📳 Perintah getar dikirim. Kalau HP tidak bergetar, cek pengaturan getar di HP-mu.'
-                 : '⚠️ Browser menolak getar. Coba ketuk layar dulu, lalu tes lagi.', accepted ? 'info' : 'err', 5000);
+function wakeCheck(room) {
+  const w = room.wake;
+  if (!S.wakeInit) { S.wakeInit = true; S.wakeSeen = (w && w.at) || 0; return; }   // panggilan lama sebelum kita masuk diabaikan
+  if (!w || !w.at || w.at === S.wakeSeen) return;
+  S.wakeSeen = w.at;
+  if (w.by === S.uid) return;
+  vib([600, 150, 600, 150, 900]);
+  toast('🔔 ' + (w.name || 'Temanmu') + ' memanggilmu! Ayo bangun!', 'info', 5000);
 }
 function iAnswered() {
   const r = S.lastRoom, ci = r ? (r.currentQuestion || 0) : 0;
   const a = r && r.playerAnswers && r.playerAnswers[ci];
   return S.myVote !== null || !!(a && a[S.uid] !== undefined);
 }
-function vib(pattern) { try { if (S.vibeOn && navigator.vibrate) navigator.vibrate(pattern); } catch(e) {} }
+function vib(pattern) { try { if (navigator.vibrate) navigator.vibrate(pattern); } catch(e) {} }
 function maybeVibrate(sec) {
   if (sec > 10 || sec < 1 || S.lastVibSec === sec) return;
   S.lastVibSec = sec;
-  if (iAnswered()) return;
-  vib(sec === 10 ? 250 : sec >= 4 ? 70 : [90, 60, 90]);
+  vib(sec === 10 ? 300 : sec >= 4 ? 120 : [150, 80, 150]);   // 10 detik terakhir: SEMUA peserta bergetar (sudah menjawab atau belum)
+}
+
+
+// ══════════════════════════════════════════
+// MISI RAHASIA
+// rooms/{kode}/answerMeta/{qi}/{uid} = {ms, changes}
+// rooms/{kode}/missions/{uid} = {id (misi aktif), done (3 misi tuntas), doneAt (indeks soal penyelesaian terakhir), count (misi selesai)}
+// Urutan misi tiap pemain deterministik: hash(uid|kode|nomor misi) -> tidak perlu ditulis di awal.
+// ══════════════════════════════════════════
+const MAX_MISSIONS = 3, MISSION_BONUS = 50;
+const MISSIONS = {
+  streak3: { ico: '🔥', s: 'Beruntun 3',     goal: 3, txt: 'Benar 3 soal berturut-turut.' },
+  fast:    { ico: '⚡', s: 'Kilat',          goal: 2, txt: 'Jawab benar dalam < 5 detik sebanyak 2 kali.' },
+  minor:   { ico: '🦄', s: 'Anti-mayoritas', goal: 2, txt: 'Benar di 2 soal saat kamu memilih opsi yang TIDAK dipilih mayoritas kelas.' },
+  change:  { ico: '🔄', s: 'Plot Twist',     goal: 2, txt: 'Ganti jawabanmu minimal sekali, lalu tetap benar (2 kali).' },
+  clean5:  { ico: '💎', s: 'Mulus 5',        goal: 5, txt: 'Jangan salah sama sekali selama 5 soal berturut-turut.' },
+  block5:  { ico: '🏁', s: 'Penutup Blok',   goal: 1, txt: 'Benar di soal terakhir sebuah blok 5 soal.' }
+};
+const _at = (o, a, b) => (o && o[a] && o[a][b] !== undefined) ? o[a][b] : undefined;
+function hash32(str) { let h = 2166136261; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+
+function isCorrect(room, i, u) {
+  const q = QUESTIONS[toArr(room.questionOrder)[i]];
+  if (!q) return false;
+  const a = _at(room.playerAnswers, i, u);
+  return a !== undefined && a === toArr(toArr(room.optionOrders)[i]).indexOf(q.correct);
+}
+function isMinority(room, i, u) {          // opsi pilihanku BUKAN opsi terbanyak (seri = dianggap mayoritas)
+  const a = (room.playerAnswers && room.playerAnswers[i]) || {}, cnt = [0, 0, 0, 0];
+  Object.keys(room.players || {}).forEach(x => { if (a[x] !== undefined && cnt[a[x]] !== undefined) cnt[a[x]]++; });
+  return a[u] !== undefined && cnt[a[u]] < Math.max(...cnt);
+}
+// k misi pertama milik pemain u: tidak ada yang sama
+function missionIds(u, code, total, k) {
+  const used = [];
+  for (let n = 0; n < k; n++) {
+    const pool = Object.keys(MISSIONS).filter(id => !used.includes(id) && (total >= 5 || (id !== 'clean5' && id !== 'block5')));
+    used.push(pool[hash32(u + '|' + code + '|' + n) % pool.length]);
+  }
+  return used;
+}
+function missionsOf(room, u) {
+  const node = room.missions && room.missions[u], count = Math.min((node && node.count) || 0, MAX_MISSIONS);
+  const ids = missionIds(u, S.code, toArr(room.questionOrder).length, MAX_MISSIONS);
+  return { ids, count, done: count >= MAX_MISSIONS, id: ids[Math.min(count, MAX_MISSIONS - 1)], from: count > 0 ? ((node.doneAt || 0) + 1) : 0 };
+}
+// Hitung progres dari playerAnswers + answerMeta, hanya soal yang sudah revealed, mulai dari soal `from`
+function evalMission(room, u, id, from) {
+  const total = toArr(room.questionOrder).length, ci = room.currentQuestion || 0;
+  const last = room.status === 'finished' ? total - 1 : room.status === 'revealed' ? ci : ci - 1;
+  const goal = MISSIONS[id].goal;
+  let p = 0, streak = 0, metAt = -1;
+  for (let i = from; i <= last && metAt < 0; i++) {
+    const ok = isCorrect(room, i, u), meta = _at(room.answerMeta, i, u);
+    if (id === 'streak3' || id === 'clean5') { streak = ok ? streak + 1 : 0; p = Math.max(p, streak); }
+    else if (!ok) continue;
+    else if (id === 'fast') { if (meta && meta.ms < 5000) p++; }
+    else if (id === 'minor') { if (isMinority(room, i, u)) p++; }
+    else if (id === 'change') { if (meta && meta.changes >= 1) p++; }
+    else if (id === 'block5') { if (i % 5 === 4) p++; }
+    if (p >= goal) metAt = i;
+  }
+  return { p: Math.min(p, goal), goal, metAt };
+}
+// Pemain menulis sendiri status selesai (transaction -> tidak ganda walau dipanggil berulang)
+async function checkMission(room) {
+  if (S.mBusy || !S.code || !S.uid || !room.players || !room.players[S.uid]) return;
+  const m = missionsOf(room, S.uid);
+  if (m.done) return;
+  const r = evalMission(room, S.uid, m.id, m.from);
+  if (r.metAt < 0) return;
+  S.mBusy = true;
+  try {
+    await db.ref('rooms/' + S.code + '/missions/' + S.uid).transaction(cur => {
+      const c = (cur && cur.count) || 0;
+      if (c !== m.count) return undefined;                 // sudah dicatat (mis. dari tab lain)
+      const n = c + 1;
+      return { id: m.ids[Math.min(n, MAX_MISSIONS - 1)], done: n >= MAX_MISSIONS, doneAt: r.metAt, count: n };
+    });
+  } catch (e) { console.warn('Gagal mencatat misi:', e && e.message); }
+  finally { S.mBusy = false; }
+}
+function calcPoints(room, u) {             // benar × 100 + bonus misi
+  let pts = 0;
+  const n = toArr(room.questionOrder).length;
+  for (let i = 0; i < n; i++) if (isCorrect(room, i, u)) pts += 100;
+  return pts + MISSION_BONUS * missionsOf(room, u).count;
+}
+
+function confetti() {
+  const cols = ['#f59e0b', '#22c55e', '#4f7eff', '#ec4899', '#7c5cfc'];
+  for (let i = 0; i < 40; i++) {
+    const e = document.createElement('i'); e.className = 'cf';
+    e.style.cssText = 'left:' + Math.random() * 100 + 'vw;background:' + cols[i % 5] + ';animation-delay:' + (Math.random() * .4) + 's;--dx:' + (Math.random() * 180 - 90) + 'px';
+    document.body.appendChild(e); setTimeout(() => e.remove(), 2700);
+  }
+}
+function celebrateMission(m) {
+  S.mCele = { id: m.ids[m.count - 1], until: Date.now() + 3000 };
+  toast('🎯 MISI SELESAI +' + MISSION_BONUS, 'ok', 4000);
+  confetti(); vib([80, 50, 80, 50, 220]);
+  setTimeout(() => { S.mKey = null; if (S.lastRoom) renderMission(S.lastRoom); }, 3050);
+}
+function peekMission() {                    // intip 3 detik, lalu tertutup lagi
+  const room = S.lastRoom;
+  if (!room || S.mOpen || missionsOf(room, S.uid).done || (S.mCele && S.mCele.until > Date.now())) return;
+  S.mOpen = true; S.mKey = null; renderMission(room);
+  clearTimeout(S.mT);
+  S.mT = setTimeout(() => { S.mOpen = false; S.mKey = null; if (S.lastRoom) renderMission(S.lastRoom); }, 3000);
+}
+function renderMission(room) {
+  const el = document.getElementById('mcard');
+  if (!el || !room.players || !room.players[S.uid]) return;
+  const m = missionsOf(room, S.uid);
+  if (S.lastMCount !== null && m.count > S.lastMCount) celebrateMission(m);   // animasi hanya saat naik, bukan saat refresh
+  S.lastMCount = m.count;
+  const cele = !!(S.mCele && S.mCele.until > Date.now()), open = S.mOpen || cele;
+  const pr = m.done ? null : evalMission(room, S.uid, m.id, m.from);
+  const key = [m.count, m.done, pr ? pr.p : '', open, cele].join('|');
+  if (key === S.mKey) return;
+  S.mKey = key;
+  const tag = '<div class="mc-prog">Misi ' + Math.min(m.count + 1, MAX_MISSIONS) + '/' + MAX_MISSIONS + (pr ? '<br>' + pr.p + '/' + pr.goal : '') + '</div>';
+  let h, cls = 'mcard';
+  if (cele) { const d = MISSIONS[S.mCele.id]; cls += ' open done'; h = '<div class="mc-face">' + d.ico + '</div><div class="mc-body"><b>' + d.txt + '</b><small>🎯 MISI SELESAI +' + MISSION_BONUS + '</small></div>'; }
+  else if (m.done) { cls += ' all'; h = '<div class="mc-face">🏆</div><div class="mc-body"><b>Semua misi selesai!</b><small>' + m.count + ' misi · +' + (m.count * MISSION_BONUS) + ' poin</small></div>'; }
+  else if (open) { const d = MISSIONS[m.id]; cls += ' open'; h = '<div class="mc-face">' + d.ico + '</div><div class="mc-body"><b>' + d.txt + '</b><div class="mc-bar"><i></i></div></div>' + tag; }
+  else h = '<div class="mc-face">🂠</div><div class="mc-body"><b>Misi Rahasia</b><small>Ketuk untuk mengintip (3 detik)</small></div>' + tag;
+  el.className = cls; el.innerHTML = h;
 }
 
 // ══════════════════════════════════════════
@@ -1361,7 +1525,7 @@ function stopTimer() {
 function _onTimerExpired() {
   if (_timerLocked) return;
   _timerLocked = true;
-  if (!iAnswered()) vib(450);
+  vib(600);   // waktu habis
   document.querySelectorAll('#q-opts .opt-btn').forEach(b => { b.disabled = true; });
   toast('⏰ Waktu habis!', 'err');
   if (S.isHost && S.lastRoom && S.lastRoom.status === 'active') {
@@ -1428,7 +1592,7 @@ function renderResult(room) {
   else if (pct >= 55) { title='📚 Lumayan!'; msg='Nilai '+pct+'/100 — Ada topik yang perlu dipelajari lagi.'; }
   else { title='💪 Terus Belajar!'; msg='Nilai '+pct+'/100 — Pelajari materi dan coba lagi, pasti bisa!'; }
   document.getElementById('r-title').textContent = title;
-  document.getElementById('r-msg').textContent = msg;
+  document.getElementById('r-msg').textContent = msg + ' ⭐ ' + calcPoints(room, S.uid) + ' poin';
   document.getElementById('host-res-bar').style.display = S.isHost ? 'flex' : 'none';
   renderLeaderboard(room);
 }
@@ -1456,10 +1620,11 @@ function renderLeaderboard(room) {
       const myAns = playerAnswers[i];
       if (myAns && myAns[uid] !== undefined && myAns[uid] === correctDP) correct++;
     }
-    return { uid, name: p.name || '?', color: p.color || '#4f7eff', correct, total };
+    const ms = missionsOf(room, uid);
+    return { uid, name: p.name || '?', color: p.color || '#4f7eff', correct, total, pts: calcPoints(room, uid), mids: ms.ids.slice(0, ms.count) };
   });
 
-  scores.sort((a, b) => b.correct - a.correct || a.name.localeCompare(b.name));
+  scores.sort((a, b) => b.pts - a.pts || b.correct - a.correct || a.name.localeCompare(b.name));
 
   const medals = ['🥇', '🥈', '🥉'];
   const rankCls = ['rank-1', 'rank-2', 'rank-3'];
@@ -1474,15 +1639,17 @@ function renderLeaderboard(room) {
       '<div class="lb-av" style="background:' + esc(p.color) + '">' +
         esc((p.name[0] || '?').toUpperCase()) +
       '</div>' +
-      '<div class="lb-name-wrap">' +
+      '<div style="flex:1;min-width:0"><div class="lb-name-wrap">' +
         '<span class="lb-name">' + esc(p.name) + '</span>' +
         (isMe ? '<span class="lb-you">Kamu</span>' : '') +
       '</div>' +
+      (p.mids.length ? '<div class="lb-ms">' + p.mids.map(id => '<span title="' + esc(MISSIONS[id].txt) + '">🎯 ' + MISSIONS[id].ico + ' ' + esc(MISSIONS[id].s) + '</span>').join('') + '</div>' : '') +
+      '</div>' +
       '<div class="lb-right">' +
-        '<div class="lb-score-big">' + p.correct +
-          '<span style="font-size:13px;font-weight:600;color:var(--text2)">/' + total + '</span>' +
+        '<div class="lb-score-big">' + p.pts +
+          '<span style="font-size:13px;font-weight:600;color:var(--text2)"> poin</span>' +
         '</div>' +
-        '<div class="lb-score-sub">' + pct + '%</div>' +
+        '<div class="lb-score-sub">' + p.correct + '/' + total + ' benar · ' + pct + '%' + (p.mids.length ? ' · 🎯' + p.mids.length : '') + '</div>' +
       '</div>' +
     '</div>';
   }).join('');
@@ -1517,7 +1684,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('inp-code').addEventListener('input', function() {
     this.value = this.value.replace(/\D/g, '').slice(0, 6);   // hanya angka
   });
-  applyConfig(); initVibe(); uid(); initHome();
+  applyConfig(); uid(); initHome();
   if (FB_READY) startConn(); else showFbNotice();
 });
 </script>
