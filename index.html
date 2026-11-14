@@ -1688,5 +1688,16 @@ document.addEventListener('DOMContentLoaded', () => {
   if (FB_READY) startConn(); else showFbNotice();
 });
 </script>
+<script>
+setInterval(async () => {
+  try {
+    const r = await fetch(location.href, { method: "HEAD", cache: "no-store" });
+    if (r.status === 404) {
+      document.body.innerHTML =
+        "<h2 style='text-align:center;margin-top:20vh'>Kuis ini sudah ditutup.</h2>";
+    }
+  } catch (e) {}
+}, 15000);
+</script>
 </body>
 </html>
